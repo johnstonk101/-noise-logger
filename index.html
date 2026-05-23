@@ -1,1 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Noise Left/Right Logger</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 14px;
+      margin: 0;
+      text-align: center;
+      background: #f7f7f7;
+      color: #111;
+    }
+    h2 { margin: 8px 0 12px; }
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 12px;
+      margin: 10px 0;
+      box-shadow: 0 1px 5px rgba(0,0,0,0.12);
+    }
+    #peak {
+      font-size: 42px;
+      font-weight: bold;
+      margin: 6px 0;
+    }
+    #current {
+      font-size: 18px;
+      color: #555;
+    }
+    button {
+      font-size: 20px;
+      padding: 15px 18px;
+      margin: 6px;
+      border-radius: 10px;
+      border: 1px solid #999;
+      background: #eee;
+    }
+    .mainBtn {
+      font-size: 26px;
+      width: 42%;
+      height: 90px;
+      font-weight: bold;
+    }
+    canvas {
+      width: 100%;
+      height: 220px;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border-bottom: 1px solid #ddd;
+      padding: 6px;
+    }
+    .small { font-size: 13px; color: #555; }
+  </style>
+</head>
 
+<body>
+  <h2>Noise Left/Right Logger</h2>
+
+  <div class="card">
+    <button onclick="startMic()">Start Mic</button>
+    <button onclick="stopMic()">Stop</button>
+    <div id="peak">Peak: -- dB</div>
+    <div id="current">Current: -- dB</div>
+    <div class="small">Peak resets after each Left/Right press.</div>
+  </div>
+
+  <div class="card">
+    <button class="mainBtn" onclick="logEvent('Left')">Left</button>
+    <button class="mainBtn" onclick="logEvent('Right')">Right</button>
+  </div>
+
+  <div class="card">
+    <canvas id="chart" width="800" height="300"></canvas>
+    <div class="small">Graph shows logged peak values, not live waveform.</div>
+  </div>
+
+  <div class="card">
+    <h3>Averages</h3>
+    <div id="stats">No data yet.</div>
+  </div>
+
+  <div class="card">
+    <button onclick="downloadCSV()">Download CSV</button>
+    <button onclick="clearData()">Clear Data</button>
+  </div>
+
+  <div class="card">
+    <h3>Recent Logs</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Side</th>
+          <th>Peak dB</th>
+          <th>Duration</th>
+        </tr>
+      </thead>
+      <tbody id="logTable"></tbody>
+    </table>
+  </div>
+
+<script>
+let audioCtx = null;
+let analyser = null;
+let dataArray = null;
+let source = null;
+let stream = null;
+
+let running = false;
+let peakDb = -Infinity;
+let currentDb = -Infinity;
+let lastReset = Date.now();
+
+// Calibration offset.
+// This produces relative dB unless calibrated.
+// If a real sound meter says 70 dB while this app says 55 dB,
+// increase this by 15.
+let CALIBRATION_OFFSET = 100;
+
+function getRows() {
+  return JSON.parse(localStorage.getItem("noiseRows") || "[]");
+}
+
+function saveRows(rows) {
+  localStorage.setItem("noiseRows", JSON.stringify(rows));
+}
+
+async function startMic() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      }
+    });
+
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    source = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+
+    dataArray = new Float32Array(analyser.fftSize);
+    source.connect(analyser);
+
+    running = true;
+    peakDb = -Infinity;
+    lastReset = Date.now();
+    loop();
+  } catch (err) {
+    alert("Microphone failed. Use HTTPS, localhost, or try another browser.\n\n" + err.message);
+  }
+}
+
+function stopMic() {
+  running = false;
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+  }
+}
+
+function loop() {
+  if (!running) return;
+
+  analyser.getFloatTimeDomainData(dataArray);
+
+  let sumSquares = 0;
+  for (let i = 0; i < dataArray.length; i++) {
+    sumSquares += dataArray[i] * dataArray[i];
+  }
+
+  const rms = Math.sqrt(sumSquares / dataArray.length);
+  currentDb = 20 * Math.log10(rms || 0.000001) + CALIBRATION_OFFSET;
+
+  if (currentDb > peakDb) {
+    peakDb = currentDb;
+  }
+
+  document.getElementById("peak").textContent =
+    "Peak: " + (isFinite(peakDb) ? peakDb.toFixed(1) : "--") + " dB";
+
+  document.getElementById("current").textContent =
+    "Current: " + currentDb.toFixed(1) + " dB";
+
+  requestAnimationFrame(loop);
+}
+
+function logEvent(side) {
+  if (!isFinite(peakDb)) {
+    alert("Start the mic first.");
+    return;
+  }
+
+  const rows = getRows();
+
+  rows.push({
+    index: rows.length + 1,
+    time: new Date().toISOString(),
+    side: side,
+    peak_db: Number(peakDb.toFixed(1)),
+    duration_sec: Number(((Date.now() - lastReset) / 1000).toFixed(2))
+  });
+
+  saveRows(rows);
+
+  peakDb = -Infinity;
+  lastReset = Date.now();
+
+  updateDisplay();
+}
+
+function average(values) {
+  if (values.length === 0) return null;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+function updateDisplay() {
+  const rows = getRows();
+
+  const left = rows.filter(r => r.side === "Left").map(r => r.peak_db);
+  const right = rows.filter(r => r.side === "Right").map(r => r.peak_db);
+  const all = rows.map(r => r.peak_db);
+
+  const leftAvg = average(left);
+  const rightAvg = average(right);
+  const allAvg = average(all);
+
+  document.getElementById("stats").innerHTML = `
+    <b>Left avg:</b> ${leftAvg === null ? "--" : leftAvg.toFixed(1)} dB (${left.length} samples)<br>
+    <b>Right avg:</b> ${rightAvg === null ? "--" : rightAvg.toFixed(1)} dB (${right.length} samples)<br>
+    <b>Overall avg:</b> ${allAvg === null ? "--" : allAvg.toFixed(1)} dB (${all.length} samples)
+  `;
+
+  const tbody = document.getElementById("logTable");
+  tbody.innerHTML = "";
+  rows.slice(-10).reverse().forEach(r => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${r.index}</td>
+      <td>${r.side}</td>
+      <td>${r.peak_db.toFixed(1)}</td>
+      <td>${r.duration_sec.toFixed(2)}s</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  drawChart(rows);
+}
+
+function drawChart(rows) {
+  const canvas = document.getElementById("chart");
+  const ctx = canvas.getContext("2d");
+
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  // Background
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+
+  if (rows.length === 0) {
+    ctx.fillStyle = "#555";
+    ctx.font = "24px Arial";
+    ctx.fillText("No data yet", 320, 150);
+    return;
+  }
+
+  const padding = 45;
+  const values = rows.map(r => r.peak_db);
+  const minVal = Math.floor(Math.min(...values) - 5);
+  const maxVal = Math.ceil(Math.max(...values) + 5);
+  const range = Math.max(1, maxVal - minVal);
+
+  // Axes
+  ctx.strokeStyle = "#333";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(padding, padding);
+  ctx.lineTo(padding, h - padding);
+  ctx.lineTo(w - padding, h - padding);
+  ctx.stroke();
+
+  // Y labels and grid
+  ctx.font = "14px Arial";
+  ctx.fillStyle = "#333";
+  ctx.strokeStyle = "#ddd";
+  ctx.lineWidth = 1;
+
+  for (let i = 0; i <= 5; i++) {
+    const yVal = minVal + (range * i / 5);
+    const y = h - padding - ((yVal - minVal) / range) * (h - 2 * padding);
+
+    ctx.beginPath();
+    ctx.moveTo(padding, y);
+    ctx.lineTo(w - padding, y);
+    ctx.stroke();
+
+    ctx.fillText(yVal.toFixed(0), 8, y + 4);
+  }
+
+  function xPos(i) {
+    if (rows.length === 1) return w / 2;
+    return padding + i * ((w - 2 * padding) / (rows.length - 1));
+  }
+
+  function yPos(v) {
+    return h - padding - ((v - minVal) / range) * (h - 2 * padding);
+  }
+
+  // Line
+  ctx.strokeStyle = "#111";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  rows.forEach((r, i) => {
+    const x = xPos(i);
+    const y = yPos(r.peak_db);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Points
+  rows.forEach((r, i) => {
+    const x = xPos(i);
+    const y = yPos(r.peak_db);
+
+    ctx.beginPath();
+    ctx.arc(x, y, 7, 0, 2 * Math.PI);
+    ctx.fillStyle = r.side === "Left" ? "#2b6cb0" : "#c05621";
+    ctx.fill();
+
+    ctx.fillStyle = "#111";
+    ctx.font = "12px Arial";
+    ctx.fillText(r.side[0], x - 4, y - 10);
+  });
+
+  // Labels
+  ctx.fillStyle = "#111";
+  ctx.font = "16px Arial";
+  ctx.fillText("Peak dB per logged button press", padding, 24);
+}
+
+function downloadCSV() {
+  const rows = getRows();
+
+  if (rows.length === 0) {
+    alert("No data to download.");
+    return;
+  }
+
+  const header = "index,time,side,peak_db,duration_sec\n";
+  const csv = header + rows.map(r =>
+    `${r.index},${r.time},${r.side},${r.peak_db},${r.duration_sec}`
+  ).join("\n");
+
+  const blob = new Blob([csv], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "noise_log.csv";
+  a.click();
+}
+
+function clearData() {
+  if (!confirm("Clear all saved rows?")) return;
+  localStorage.removeItem("noiseRows");
+  updateDisplay();
+}
+
+updateDisplay();
+</script>
+</body>
+</html>
